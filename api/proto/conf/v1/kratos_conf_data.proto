@@ -1,0 +1,99 @@
+syntax = "proto3";
+
+package conf.v1;
+
+import "google/protobuf/duration.proto";
+import "conf/v1/kratos_conf_tls.proto";
+
+option go_package = "github.com/alec504/kratos-bootstrap/api/gen/go/conf/v1;confv1";
+
+// 数据
+message Data {
+  // 数据库
+  message Database {
+    string driver = 1;  // 驱动名：mysql、postgresql、mongodb、sqlite……
+    string source = 2;  // 数据源（DSN字符串）
+
+    bool migrate = 10; // 数据迁移开关
+    bool debug = 11; // 调试开关
+    bool enable_trace = 12; // 链路追踪开关
+    bool enable_metrics = 13; // 性能分析开关
+
+    int32 max_idle_connections = 20; // 连接池最大空闲连接数
+    int32 max_open_connections = 21; // 连接池最大打开连接数
+    google.protobuf.Duration connection_max_lifetime = 22; // 连接可重用的最大时间长度
+
+    // 从库配置
+    message Replica {
+      string source = 1;  // 从库数据源（DSN字符串）
+      int32 max_idle_connections = 2; // 连接池最大空闲连接数
+      int32 max_open_connections = 3; // 连接池最大打开连接数
+      google.protobuf.Duration connection_max_lifetime = 4; // 连接可重用的最大时间长度
+    }
+
+    repeated Replica replicas = 30; // 从库列表
+  }
+
+  // redis
+  message Redis {
+    string network = 1; // 网络
+    string addr = 2;  // 服务端地址
+    string password = 3;  // 密码
+    int32 db = 4; // 数据库索引
+
+    google.protobuf.Duration dial_timeout = 5;  // 连接超时时间
+    google.protobuf.Duration read_timeout = 6;  // 读取超时时间
+    google.protobuf.Duration write_timeout = 7; // 写入超时时间
+
+    bool enable_tracing = 8; // 打开链路追踪
+    bool enable_metrics = 9; // 打开性能度量
+  }
+
+  message ElasticSearch {
+    repeated string addresses = 1;
+    string username = 2;
+    string password = 3;
+    bool enable_sniffer = 4;
+    bool enable_gzip = 5;
+    bool debug = 6; // 调试开关
+    bool enable_health = 7; // 检查检查
+    google.protobuf.Duration health_check_interval = 8;
+  }
+
+  // OpenSearch
+  message OpenSearch {
+    repeated string addresses = 1; // 对端网络地址
+
+    optional string username = 2; // 用户名
+    optional string password = 3; // 密码
+
+    repeated int32 retry_on_status = 4; // 触发重试的HTTP状态码列表，例如 [502, 503, 504]
+    optional bool disable_retry = 5; // 禁用重试
+    optional bool enable_retry_on_timeout = 6; // 是否在请求超时时触发重试
+    optional int32 max_retries = 7; // 最大重试次数
+
+    optional bool compress_request_body = 8; // 是否压缩请求体
+
+    optional bool discover_nodes_on_start = 9; // 启动时发现节点
+    optional google.protobuf.Duration discover_nodes_interval = 10; // 发现节点间隔时间
+
+    optional bool enable_metrics = 60; // 打开性能度量
+    optional bool enable_debug_logger = 61; // 打开调试日志记录器
+
+    optional TLS tls = 70; // TLS配置
+  }
+
+  // RabbitMQ
+  message RabbitMQ {
+    repeated string endpoints = 1;  // 对端网络地址
+  }
+
+  Database database = 1;  // 数据库DSN
+  Redis redis = 2;  // Redis
+  ElasticSearch elasticsearch = 3;  // ElasticSearch数据库
+  OpenSearch opensearch = 4; // OpenSearch数据库
+
+  // Message Queue
+
+  optional RabbitMQ rabbitmq = 10;  // RabbitMQ服务
+}

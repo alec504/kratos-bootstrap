@@ -1,0 +1,118 @@
+package tracer
+
+import (
+	"context"
+	"errors"
+	"os"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
+	"go.opentelemetry.io/otel/sdk/resource"
+	traceSdk "go.opentelemetry.io/otel/sdk/trace"
+	semConv "go.opentelemetry.io/otel/semconv/v1.20.0"
+
+	conf "github.com/alec504/kratos-bootstrap/api/gen/go/conf/v1"
+)
+
+// NewTracerExporter 创建一个导出器，支持：zipkin、otlp-http、otlp-grpc
+func NewTracerExporter(exporterName, endpoint string, insecure bool) (traceSdk.SpanExporter, error) {
+	ctx := context.Background()
+
+	switch exporterName {
+	case "jaeger":
+		return nil, errors.New("jaeger exporter is no longer supported, please use otlp-http or otlp-grpc replace it")
+	case "otlp-http":
+		return NewOtlpHttpExporter(ctx, endpoint, insecure)
+	case "otlp-grpc":
+		return NewOtlpGrpcExporter(ctx, endpoint, insecure)
+	default:
+		fallthrough
+	case "stdout":
+		return stdouttrace.New()
+	}
+}
+
+// NewTracerProvider 创建一个链路追踪器
+func NewTracerProvider(cfg *conf.Tracer, appInfo *conf.AppInfo) error {
+	// tracing 是可选能力。未配置 trace，或应用身份尚未准备好时，
+	// 保持 OpenTelemetry 当前的全局 provider，不阻断应用启动。
+	if cfg == nil || appInfo == nil {
+		return nil
+	}
+
+	if cfg.Sampler < 0 {
+		return nil
+	}
+
+	env := cfg.GetEnv()
+	if env == "" {
+		env = os.Getenv("GO_ENV")
+	}
+
+	opts := []traceSdk.TracerProviderOption{
+		traceSdk.WithSampler(traceSdk.ParentBased(traceSdk.TraceIDRatioBased(cfg.GetSampler()))),
+		traceSdk.WithResource(resource.NewSchemaless(
+			semConv.ServiceNamespaceKey.String(appInfo.GetProject()),
+			semConv.ServiceNameKey.String(appInfo.GetServiceName()),
+			semConv.ServiceVersionKey.String(appInfo.GetVersion()),
+			semConv.ServiceInstanceIDKey.String(appInfo.GetInstanceId()),
+			attribute.String("env", env),
+		)),
+	}
+
+	if len(cfg.GetEndpoint()) > 0 {
+		exp, err := NewTracerExporter(cfg.GetBatcher(), cfg.GetEndpoint(), cfg.GetInsecure())
+		if err != nil {
+			return err
+		}
+
+		opts = append(opts, traceSdk.WithBatcher(exp))
+	}
+
+	tp := traceSdk.NewTracerProvider(opts...)
+	if tp == nil {
+		return errors.New("create tracer provider failed")
+	}
+
+	otel.SetTracerProvider(tp)
+
+	return nil
+}
+
+// NewOtlpHttpExporter 创建OTLP/HTTP导出器，默认端口：4318
+func NewOtlpHttpExporter(ctx context.Context, endpoint string, insecure bool, options ...otlptracehttp.Option) (traceSdk.SpanExporter, error) {
+	var opts []otlptracehttp.Option
+	opts = append(opts, otlptracehttp.WithEndpoint(endpoint))
+
+	if insecure {
+		opts = append(opts, otlptracehttp.WithInsecure())
+	}
+
+	opts = append(opts, options...)
+
+	return otlptrace.New(
+		ctx,
+		otlptracehttp.NewClient(opts...),
+	)
+}
+
+// NewOtlpGrpcExporter 创建OTLP/gRPC导出器，默认端口：4317
+func NewOtlpGrpcExporter(ctx context.Context, endpoint string, insecure bool, options ...otlptracegrpc.Option) (traceSdk.SpanExporter, error) {
+	var opts []otlptracegrpc.Option
+	opts = append(opts, otlptracegrpc.WithEndpoint(endpoint))
+
+	if insecure {
+		opts = append(opts, otlptracegrpc.WithInsecure())
+	}
+
+	opts = append(opts, options...)
+
+	return otlptrace.New(
+		ctx,
+		otlptracegrpc.NewClient(opts...),
+	)
+}

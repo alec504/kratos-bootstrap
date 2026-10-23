@@ -1,0 +1,353 @@
+# kratos-bootstrap
+
+`kratos-bootstrap` 是一个面向 [go-kratos/kratos](https://github.com/go-kratos/kratos) 的 Go 服务启动辅助库。它封装了 Kratos 服务常见的启动、配置加载、日志、链路追踪、指标、HTTP/gRPC 服务初始化，以及部分常用数据客户端的基础接入。
+
+## 功能特性
+
+- 基于 `kratos.App` 的应用启动辅助方法。
+- 统一的 protobuf 配置定义，位于 `api/proto/conf/v1`。
+- 支持从环境变量和本地配置文件加载配置。
+- 支持 Kratos 标准日志和 zap 日志。
+- 支持 OpenTelemetry 链路追踪，包含 stdout、OTLP/gRPC、OTLP/HTTP exporter。
+- 支持 Prometheus 和 OTLP 指标导出。
+- 提供 HTTP/gRPC Server 和 Client 的快速创建方法。
+- 提供可选的 Redis、Elasticsearch、OpenSearch、Ent 客户端辅助模块。
+
+## 安装
+
+```bash
+go get github.com/alec504/kratos-bootstrap
+```
+
+可选的数据客户端辅助模块是独立 Go module，需要时单独安装：
+
+```bash
+go get github.com/alec504/kratos-bootstrap/cache/redis
+go get github.com/alec504/kratos-bootstrap/data/elasticsearch
+go get github.com/alec504/kratos-bootstrap/data/opensearch
+go get github.com/alec504/kratos-bootstrap/data/ent
+```
+
+## 目录结构
+
+```text
+api/                  protobuf 配置定义和生成后的 Go 类型
+bootstrap.go          应用启动辅助方法
+context.go            启动 Context、自定义配置注册和 Wire providers
+config/               配置加载和应用信息处理
+logger/               Kratos logger provider
+metrics/              OpenTelemetry metrics 初始化
+rpc/                  HTTP/gRPC Server 和 Client 辅助方法
+tracer/               OpenTelemetry tracing 初始化
+cache/redis/          可选 Redis 辅助模块
+data/elasticsearch/   可选 Elasticsearch 辅助模块
+data/opensearch/      可选 OpenSearch 辅助模块
+data/ent/             可选 Ent 辅助模块
+```
+
+## 生成 protobuf 代码
+
+本仓库使用 `buf` 和 `protoc-gen-go` 生成 Go 代码。
+
+```bash
+make api
+```
+
+该命令会进入 `api/` 目录执行 `buf generate`，生成结果输出到 `api/gen/go`。
+
+## 基础用法
+
+```go
+package main
+
+import (
+	appv1 "example.com/project/api/gen/go/app/v1"
+	"github.com/alec504/kratos-bootstrap"
+	confv1 "github.com/alec504/kratos-bootstrap/api/gen/go/conf/v1"
+	"github.com/go-kratos/kratos/v2"
+)
+
+func initApp(ctx *bootstrap.Context) (*kratos.App, func(), error) {
+	logger := bootstrap.LoggerFromContext(ctx)
+	cfg := bootstrap.ConfigFromContext(ctx)
+	appConfig, err := bootstrap.GetCustomConfig[*appv1.AppConfig](ctx, "app")
+	if err != nil {
+		return nil, nil, err
+	}
+	_, _, _ = logger, cfg, appConfig
+
+	app := bootstrap.NewApp(ctx)
+	return app, func() {}, nil
+}
+
+func main() {
+	ctx := bootstrap.NewContext(&confv1.AppInfo{
+		Project:   "example",
+		AppId: "service",
+		Version:   "v0.1.0",
+	})
+	ctx.RegisterCustomConfig("app", &appv1.AppConfig{})
+	ctx.Run(initApp)
+}
+```
+
+实际项目通常会在 `initApp` 中创建 HTTP/gRPC server，然后传给 `bootstrap.NewApp`。
+
+自定义配置必须是生成的 Proto message，可以通过多个不同 key 同时注册：
+
+```go
+ctx := bootstrap.NewContext(&confv1.AppInfo{
+	Project:   "example",
+	AppId: "service",
+	Version:   "v0.1.0",
+})
+ctx.RegisterCustomConfig("app", &appv1.AppConfig{})
+ctx.RegisterCustomConfig("worker", &appv1.WorkerConfig{})
+ctx.Run(initApp)
+```
+
+`AppInfo` 是由 `api/proto/conf/v1/app_info.proto` 生成的应用身份模型，调用方直接使用 `confv1.AppInfo`。`Project` 表示项目，Proto 字段 `app_id`（Go 字段 `AppId`）表示项目内可独立部署的应用，`service_name`（Go 字段 `ServiceName`）为空时自动设置为 `<project>-<app_id>`（`config.ServiceName(appInfo)` 也会优先读取该值）；`Hostname` 为空时按 `POD_NAME`、`HOSTNAME`、操作系统 hostname 的顺序解析。`InstanceId` 为空且 `AppId` 有效时默认使用 `Hostname`；如果调用方需要其他实例标识，也可以显式设置 `InstanceId`。`Version` 为空时使用 `1.0.0`，`Metadata` 会被深拷贝并初始化。`Context` 是启动阶段的 facade 和只读依赖载体，不是请求链路中的 `context.Context`。`Run` 会先用标准输出记录一次应用身份，再加载配置并初始化 Logger，随后把这些依赖绑定到 Context 后调用 `initApp(ctx)`；即使配置加载失败，也能看到这条启动诊断信息。每个自定义配置 target 必须是非 nil 的 Proto message，同一次启动中的 key 不能重复，且只能在 `Run` 前注册；非法注册会立即 panic。Context 会把本次启动注册的 targets 显式交给配置加载器，不使用进程级全局 registry。
+
+当 `AppInfo` 包含非空 `AppId` 时，Logger 才追加 `service.name`、`service.version` 和 `service.instance.id` 三个身份字段，并直接附加 Kratos 的 `trace_id` 和 `span_id` Valuer。Tracer 和 Metrics 的资源直接写入 OpenTelemetry 的 `service.namespace`（对应 `Project`）、`service.name`（对应 `ServiceName`）、`service.instance.id` 和环境属性；Tracer 还写入 `service.version`，Metrics 使用 `deployment.environment`。Kratos 应用的 `Name` 和 `ID` 选项分别使用派生服务名与 `InstanceId`。
+
+使用 Wire 时，将 `*bootstrap.Context` 作为 injector 的唯一根参数，并只在 composition root 通过以下 provider 函数提取显式依赖：
+
+```go
+var bootstrapProviderSet = wire.NewSet(
+	bootstrap.AppInfoFromContext,
+	bootstrap.LoggerFromContext,
+	bootstrap.ConfigFromContext,
+)
+
+func initApp(*bootstrap.Context) (*kratos.App, func(), error) {
+	panic(wire.Build(bootstrapProviderSet, server.ProviderSet, data.ProviderSet, newApp))
+}
+```
+
+具体业务配置继续由 composition root 从 registry 提取，业务构造函数不要直接依赖 `*bootstrap.Context`：
+
+```go
+func provideAppConfig(ctx *bootstrap.Context) (*appv1.AppConfig, error) {
+	return bootstrap.GetCustomConfig[*appv1.AppConfig](ctx, "app")
+}
+```
+
+## 应用停止前等待
+
+`NewApp` 默认不注册停机前等待：
+
+```go
+const DefaultBeforeStopDelay = 0
+```
+
+如需给网关、负载均衡或服务发现系统留出摘流时间，可以显式使用 `NewAppWithOptions` 注入等待窗口：
+
+```go
+app := bootstrap.NewAppWithOptions(
+	ctx,
+	[]transport.Server{httpServer, grpcServer},
+	bootstrap.WithBeforeStopDelay(10*time.Second),
+)
+```
+
+如需保持默认不等待，可以继续使用：
+
+```go
+app := bootstrap.NewApp(ctx, httpServer)
+```
+
+显式配置正数等待时间后，等待逻辑会使用 `time.Sleep`，确保进程在配置的 drain window 内持续等待。
+
+## HTTP Server
+
+```go
+httpServer := rpc.CreateHTTPServer(cfg, logger)
+```
+
+`CreateHTTPServer` 支持通过配置启用以下能力：
+
+- recovery
+- tracing
+- tracing operation exclude（按 transport.Operation() 精确/前缀排除，HTTP/gRPC 通用）
+- validation
+- logging
+- BBR rate limit
+- Kratos metrics middleware
+- CORS
+- pprof
+
+同时会注册：
+
+- `/ready`：返回 `200 OK`
+- `/metrics`：当 HTTP server metrics 配置启用时注册
+
+如果需要注入原生 Kratos HTTP ServerOption，可以使用 `CreateHTTPServerWithOptions`：
+
+```go
+httpServer := rpc.CreateHTTPServerWithOptions(
+	cfg,
+	logger,
+	[]kratosHttp.ServerOption{
+		kratosHttp.ErrorEncoder(customErrorEncoder),
+	},
+)
+```
+
+如果部分 HTTP/gRPC operation 不需要创建 span，可以在对应 `middleware.tracing` 下配置排除规则：
+
+```yaml
+server:
+  http:
+    middleware:
+      enable_tracing: true
+      tracing:
+        exclude_operations:
+          - /api/items/{id}
+          - /helloworld.Greeter/SayHello
+        exclude_operation_prefixes:
+          - /debug/pprof/
+          - /helloworld.InternalService/
+```
+
+`exclude_operations` 和 `exclude_operation_prefixes` 统一匹配 Kratos `transport.Operation()`：HTTP 通常是 path template（如 `/api/items/{id}`），gRPC 通常是 full method（如 `/helloworld.Greeter/SayHello`）。
+
+命中排除规则后，不只跳过当前 server/client span；还会把当前 context 标记为 unsampled parent，使后续 child span 和下游服务调用在 `ParentBased` sampler 下继续保持不采样。
+
+跨服务抑制依赖 client tracing middleware 注入 unsampled `traceparent` 到下游请求；因此如果希望“当前接口及其下游调用都不产生 trace”，对应下游 client 的 `enable_tracing` 仍需保持开启。
+
+## gRPC Server
+
+```go
+grpcServer := rpc.CreateGrpcServer(cfg, logger)
+```
+
+`CreateGrpcServer` 支持通过配置启用以下能力：
+
+- recovery
+- tracing
+- validation
+- metadata
+- logging
+- JWT auth
+- BBR rate limit
+- Kratos metrics middleware
+
+客户端和服务端的最大消息大小可通过 `max_msg_size` 配置，单位为 MB。
+
+## gRPC Keepalive
+
+bootstrap 默认不注入客户端 Keepalive 和自定义服务端 EnforcementPolicy；配置缺失或 `enable: false` 时保持 grpc-go 原有行为（客户端 Keepalive 关闭，服务端沿用默认的 `MinTime=5m`、`PermitWithoutStream=false`）。该能力适用于 K8s Headless Service 等需要主动识别网络黑洞连接的场景：
+
+```yaml
+client:
+  grpc:
+    keepalive:
+      enable: true
+      time: 60s
+      timeout: 10s
+      permit_without_stream: true
+
+server:
+  grpc:
+    keepalive_enforcement_policy:
+      enable: true
+      min_time: 30s
+      permit_without_stream: true
+```
+
+启用客户端 Keepalive 时，`time` 和 `timeout` 必须为正数，且 `time` 不能小于 grpc-go 的 10 秒最小值；服务端 `min_time` 也必须为正数。非法配置会在创建 gRPC client/server 时导致启动失败，不会静默回退。
+
+客户端配置必须与服务端策略协同：客户端 `time` 不应小于服务端 `min_time`，并且当客户端允许无活跃 RPC 发送 PING 时，服务端也必须允许。发布时应先确保全部服务端实例已经启用兼容的 EnforcementPolicy，再启用客户端；回滚顺序相反。
+
+在 Linux 上，grpc-go 启用客户端 Keepalive 后还会把连接的 `TCP_USER_TIMEOUT` 设置为这里的 `timeout`。上述值只是 Headless Service 的起始示例，不是库的硬编码默认值，应结合网络延迟和连接规模灰度调整。
+
+## 配置结构
+
+根配置消息是 `conf.Bootstrap`：
+
+```proto
+message Bootstrap {
+  Server server = 1;
+  Client client = 2;
+  Data data = 3;
+  Tracer trace = 4;
+  Logger logger = 5;
+  Notification notify = 9;
+  Metrics metrics = 10;
+}
+```
+
+主要配置块：
+
+- `server`：HTTP/gRPC 监听地址、超时、CORS、TLS、中间件。
+- `client`：HTTP/gRPC 客户端 endpoint、超时、TLS、中间件。
+- `data`：数据库、Redis、Elasticsearch、OpenSearch、RabbitMQ 连接配置。
+- `trace`：OpenTelemetry tracing exporter 配置。
+- `logger`：标准日志或 zap 日志配置。
+- `metrics`：Prometheus/OTLP 指标配置。
+- `notify`：通用通知开关，具体通知通道由上层适配库实现。
+
+配置加载基于 Kratos config source：
+
+```go
+cfg := config.NewConfigProvider("../../configs")
+```
+
+`DoBootstrap` 会读取 `-conf` 命令行参数作为配置路径，默认值为 `../../configs`。
+
+## Logger
+
+支持的日志类型：
+
+- `std`
+- `zap`
+
+zap 日志支持控制台输出、文件输出、错误文件输出、日志级别、文件大小轮转、保留天数、备份数量和压缩。
+
+## Tracing
+
+链路追踪支持：
+
+- `stdout`
+- `otlp-grpc`
+- `otlp-http`
+
+不直接支持 `jaeger` exporter；如需接入 Jaeger，建议通过 OTLP Collector 转发。
+
+`trace` 配置块可以省略；省略时跳过 tracer 初始化，不影响应用启动。
+
+## Metrics
+
+指标导出支持：
+
+- `prometheus`
+- `otlp-grpc`
+- `otlp-http`
+
+`otlp-grpc` 和 `otlp-http` 不能同时启用。Prometheus 可以和其中一个 OTLP exporter 同时启用。
+
+## 校验
+
+运行主模块测试：
+
+```bash
+go test ./...
+```
+
+运行可选辅助模块测试：
+
+```bash
+cd cache/redis && go test ./...
+cd ../../data/elasticsearch && go test ./...
+cd ../ent && go test ./...
+```
+
+运行 protobuf lint：
+
+```bash
+cd api && buf lint
+```
+
+## License
+
+MIT
