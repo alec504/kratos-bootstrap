@@ -1,6 +1,6 @@
 module github.com/alec504/kratos-bootstrap/cache/redis
 
-go 1.25.4
+go 1.26.0
 
 require (
 	github.com/alec504/kratos-bootstrap v1.5.0
@@ -19,7 +19,7 @@ require (
 	go.opentelemetry.io/otel/metric v1.43.0 // indirect
 	go.opentelemetry.io/otel/trace v1.43.0 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
-	google.golang.org/protobuf v1.36.11 // indirect
+	google.golang.org/protobuf v1.36.12 // indirect
 )
 
 // replace github.com/alec504/kratos-bootstrap => ../..
